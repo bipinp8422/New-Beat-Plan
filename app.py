@@ -125,6 +125,16 @@ if not st.session_state.logged_in:
 from pathlib import Path
 HERE = Path(__file__).parent
 
+# Auto-build the page files from your ORIGINAL scripts (beat_original.py / tps_original.py) if present.
+try:
+    import make_pages
+    for _src, _dst, _fn in (("beat_original.py", "beat_plan.py", make_pages.make_beat),
+                            ("tps_original.py", "tps.py", make_pages.make_tps)):
+        if (HERE / _src).exists() and not (HERE / _dst).exists():
+            (HERE / _dst).write_text(_fn((HERE / _src).read_text(encoding="utf-8")), encoding="utf-8")
+except Exception as _e:
+    st.error(f"Could not build page files from the original scripts: {_e}")
+
 
 def _page(fname, title, icon):
     if (HERE / fname).exists():
