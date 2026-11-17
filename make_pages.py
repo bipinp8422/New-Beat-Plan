@@ -40,7 +40,7 @@ def make_tps(src):
     s = re.sub(r'ULTRAMSG_INSTANCE_ID\s*=\s*".*?"', 'ULTRAMSG_INSTANCE_ID = st.secrets.get("ULTRAMSG_INSTANCE_ID", "")', s, count=1)
     s = re.sub(r'ULTRAMSG_TOKEN\s*=\s*".*?"', 'ULTRAMSG_TOKEN       = st.secrets.get("ULTRAMSG_TOKEN", "")', s, count=1)
     a = s.index("# Initialize session state")
-    b = s.index("# ---------------------------------------------------------------\n# Helpers")
+    b = re.search(r"# -{10,}\n# Helpers", s).start()
     s = s[:a] + s[b:]
     a = s.index("def login():")
     b = s.index("# ------", a)
