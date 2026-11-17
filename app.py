@@ -122,10 +122,25 @@ if not st.session_state.logged_in:
     login()
     st.stop()
 
+from pathlib import Path
+HERE = Path(__file__).parent
+
+
+def _page(fname, title, icon):
+    if (HERE / fname).exists():
+        return st.Page(str(HERE / fname), title=title, icon=icon)
+
+    def _missing():
+        st.error(f"❌ `{fname}` was not found next to app.py. Run make_pages.py, "
+                 f"then commit and push {fname} to the repo root.")
+        st.caption("Files found here: " + ", ".join(sorted(p.name for p in HERE.iterdir())))
+    return st.Page(_missing, title=title + " (missing)", icon="⚠️", url_path=Path(fname).stem)
+
+
 pages = [st.Page(home, title="Home", icon="🏠", default=True)]
 if st.session_state.role in ("admin", "employee"):
-    pages.append(st.Page("beat_plan.py", title="Beat Plan", icon="🚀"))
-pages.append(st.Page("tps.py", title="TPS Counters", icon="📊"))
+    pages.append(_page("beat_plan.py", "Beat Plan", "🚀"))
+pages.append(_page("tps.py", "TPS Counters", "📊"))
 
 with st.sidebar:
     st.caption(f"👤 {st.session_state.user_name} ({st.session_state.role})")
