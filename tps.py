@@ -27,8 +27,8 @@ def get_secret(name: str, default=None):
 # ── Supabase credentials ──
 # Streamlit Cloud: Settings -> Secrets
 # Local: .env file (keep .env in .gitignore!)
-SUPABASE_URL = get_secret("SUPABASE_URL")
-SUPABASE_KEY = get_secret("SUPABASE_KEY")
+SUPABASE_URL = "https://bfxviifbzulbxdfybtro.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJmeHZpaWZienVsYnhkZnlidHJvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUwMzY2NDksImV4cCI6MjEwMDYxMjY0OX0.aTQJjN4D7WGo8URaoqu3axoloYW6xY46HdmRXx0xDfs"
 
 # ── UltraMsg WhatsApp API credentials ──
 ULTRAMSG_INSTANCE_ID = get_secret("ULTRAMSG_INSTANCE_ID")
