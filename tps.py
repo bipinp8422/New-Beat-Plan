@@ -4,6 +4,7 @@ from datetime import datetime
 from io import BytesIO
 import os
 import re
+import time
 import requests
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -11,11 +12,27 @@ from supabase import create_client, Client
 # Load environment variables (used for local development only)
 load_dotenv()
 
-# Initialize Supabase credentials
-# On Streamlit Cloud: set these in Settings -> Secrets
-# Locally: set these in a .env file (make sure .env is in .gitignore!)
-SUPABASE_URL = "https://bfxviifbzulbxdfybtro.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJmeHZpaWZienVsYnhkZnlidHJvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUwMzY2NDksImV4cCI6MjEwMDYxMjY0OX0.aTQJjN4D7WGo8URaoqu3axoloYW6xY46HdmRXx0xDfs"
+
+def get_secret(name: str, default=None):
+    """Read a credential from Streamlit Secrets first, then from environment
+    variables / .env. Never hardcode keys in this file."""
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass  # No secrets.toml present (e.g. local run) - fall back to env
+    return os.getenv(name, default)
+
+
+# ── Supabase credentials ──
+# Streamlit Cloud: Settings -> Secrets
+# Local: .env file (keep .env in .gitignore!)
+SUPABASE_URL = get_secret("SUPABASE_URL")
+SUPABASE_KEY = get_secret("SUPABASE_KEY")
+
+# ── UltraMsg WhatsApp API credentials ──
+ULTRAMSG_INSTANCE_ID = get_secret("ULTRAMSG_INSTANCE_ID")
+ULTRAMSG_TOKEN = get_secret("ULTRAMSG_TOKEN")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("❌ Supabase credentials not found! Please set SUPABASE_URL and SUPABASE_KEY in Streamlit Secrets (or a local .env file)")
@@ -27,10 +44,6 @@ except Exception as e:
     st.error(f"❌ Failed to connect to Supabase: {str(e)}")
     st.stop()
 
-# ── UltraMsg WhatsApp API Credentials ──
-# Set these in Streamlit Secrets (or .env for local)
-ULTRAMSG_INSTANCE_ID = "instance186843"
-ULTRAMSG_TOKEN       = "ckaglr8uezzfvg49"
 
 def send_whatsapp_notification(to_number: str, message: str) -> dict:
     """
@@ -41,9 +54,8 @@ def send_whatsapp_notification(to_number: str, message: str) -> dict:
         st.warning("⚠️ UltraMsg credentials not configured. WhatsApp notification skipped.")
         return {"sent": False, "error": "Missing credentials"}
 
-    # Clean the number
     to_number = str(to_number).strip().replace("+", "").replace(" ", "").replace("-", "")
-    
+
     url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE_ID}/messages/chat"
     payload = {
         "token": ULTRAMSG_TOKEN,
@@ -51,11 +63,11 @@ def send_whatsapp_notification(to_number: str, message: str) -> dict:
         "body": message,
         "priority": 10,
     }
-    
+
     try:
         resp = requests.post(url, data=payload, timeout=15)
         resp.raise_for_status()
-        return resp.json()  # e.g., {"sent":"true","message":"ok","id":12345}
+        return resp.json()
     except Exception as e:
         st.warning(f"⚠️ WhatsApp send failed: {e}")
         return {"sent": False, "error": str(e)}
@@ -68,24 +80,22 @@ def get_tl_for_employee(emp_id: str):
     NOTE: Requires 'whatsapp_number' column in tl_users table.
     """
     try:
-        # 1. Get employee's region
         emp_res = supabase.table("employees").select("region, emp_name").eq("emp_id", emp_id).execute()
         if not emp_res.data:
             return None
         emp_region = emp_res.data[0].get("region")
-        emp_name   = emp_res.data[0].get("emp_name", emp_id)
-        
+        emp_name = emp_res.data[0].get("emp_name", emp_id)
+
         if not emp_region:
             return None
 
-        # 2. Find TL for that region (try lowercase column first, then capitalized)
         for col in ("region", "Region", "REGION"):
             try:
                 tl_res = supabase.table("tl_users").select("tl_id, tl_name, whatsapp_number").eq(col, emp_region).execute()
                 if tl_res.data and len(tl_res.data) > 0:
                     tl = tl_res.data[0]
                     tl["employee_region"] = emp_region
-                    tl["employee_name"]   = emp_name
+                    tl["employee_name"] = emp_name
                     return tl
             except Exception as e:
                 if "does not exist" in str(e) or "42703" in str(e):
@@ -137,45 +147,33 @@ if 'logged_in' not in st.session_state:
 def validate_gst_format(gst_number):
     """
     Validate GST format.
-    GST is 15 characters: 2 digits (state code) + 10 chars (PAN) + 1 char (entity) + 1 checksum
-    Valid GST format examples: 27AAFCA1234G2Z0
-    
+    GST is 15 characters: 2 digits (state code) + 10 chars (PAN) + 1 char (entity) + Z + 1 checksum
+    Valid GST format example: 27AAFCA1234G2Z0
+
     Returns: (is_valid: bool, message: str)
     """
     if not gst_number:
         return False, "GST Number is required"
-    
+
     gst_number = gst_number.strip().upper()
-    
-    # Check length
+
     if len(gst_number) != 15:
         return False, f"❌ GST Number must be exactly 15 characters (currently {len(gst_number)})"
-    
-    # Check if all characters are alphanumeric
+
     if not gst_number.isalnum():
         return False, "❌ GST Number must contain only letters and numbers (no spaces or special characters)"
-    
-    # Standard GST format: 2 digits + 5 letters + 4 digits + 1 letter + 1 alphanumeric (1-9 or A-Z) + Z + 1 alphanumeric
-    # Pattern breakdown:
-    # ^[0-9]{2}     - State code (2 digits)
-    # [A-Z]{5}      - PAN prefix (5 letters)
-    # [0-9]{4}      - PAN sequence (4 digits)
-    # [A-Z]{1}      - PAN check digit (1 letter)
-    # [1-9A-Z]{1}   - Entity code (1 to 9 or A to Z)
-    # [Z]{1}        - Fixed Z
-    # [0-9A-Z]{1}$  - Checksum (0-9 or A-Z)
+
     pattern = r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$'
-    
+
     if re.match(pattern, gst_number):
         return True, "✅ Valid GST format"
-    
+
     return False, "❌ Invalid GST format. Expected 15 alphanumeric characters (e.g., 27AAFCA1234G2Z0)"
 
 
 def fetch_all_rows(table_name, select="*", eq_filters=None):
     """Fetch every row from a Supabase table, paging past the default
-    1000-row response limit (this app's `partners` table can hold
-    thousands of counter rows)."""
+    1000-row response limit."""
     rows = []
     page_size = 1000
     start = 0
@@ -195,20 +193,11 @@ def fetch_all_rows(table_name, select="*", eq_filters=None):
 
 def get_tl_region(tl_id):
     """
-    Look up the TL's region, tolerant of column-name casing.
-
-    Some Supabase tables were created with a quoted/capitalized column
-    name (e.g. "Region" instead of region), which makes PostgREST
-    case-sensitive for that column and causes:
-      {'message': 'column tl_users.region does not exist', 'code': '42703', ...}
-
-    This tries the lowercase name first (the convention used everywhere
-    else in this app) and falls back to the capitalized variant so the
-    dashboard keeps working either way.
+    Look up the TL's region, tolerant of column-name casing
+    (region / Region / REGION).
 
     Recommended long-term fix (run once in the Supabase SQL editor):
         ALTER TABLE tl_users RENAME COLUMN "Region" TO region;
-    After that, this function will just use the fast lowercase path.
     """
     for col in ("region", "Region", "REGION"):
         try:
@@ -219,9 +208,7 @@ def get_tl_region(tl_id):
         except Exception as e:
             msg = str(e)
             if "does not exist" in msg or "42703" in msg:
-                # Try the next casing variant
                 continue
-            # Some other error (network, auth, etc.) - surface it
             raise
     return None
 
@@ -256,27 +243,25 @@ def to_excel_bytes(sheets: dict):
 
 def to_excel_bytes_formatted(sheets: dict, title_row=True):
     """Build a formatted .xlsx file with colors and auto-sized columns."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for sheet_name, df in sheets.items():
             safe_name = sheet_name[:31]
             df.to_excel(writer, sheet_name=safe_name, index=False)
-            
-            # Get the worksheet to format it
+
             worksheet = writer.sheets[safe_name]
-            
-            # Format headers
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
             header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
             header_font = Font(bold=True, color="FFFFFF", size=11)
             header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            
-            # Apply header formatting
+
             for cell in worksheet[1]:
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.alignment = header_alignment
-            
+
             # Auto-size columns
             for column in worksheet.columns:
                 max_length = 0
@@ -285,26 +270,76 @@ def to_excel_bytes_formatted(sheets: dict, title_row=True):
                     try:
                         if cell.value:
                             max_length = max(max_length, len(str(cell.value)))
-                    except:
+                    except Exception:
                         pass
                 adjusted_width = min(max_length + 2, 50)
                 worksheet.column_dimensions[column_letter].width = adjusted_width
-            
-            # Add borders
+
+            # Borders
             thin_border = Border(
                 left=Side(style='thin'),
                 right=Side(style='thin'),
                 top=Side(style='thin'),
                 bottom=Side(style='thin')
             )
-            for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row, 
-                                          min_col=1, max_col=worksheet.max_column):
+            for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row,
+                                           min_col=1, max_col=worksheet.max_column):
                 for cell in row:
                     cell.border = thin_border
-                    if cell.row > 1:  # Data rows
+                    if cell.row > 1:
                         cell.alignment = Alignment(horizontal="left", vertical="center")
-    
+
     return buffer.getvalue()
+
+
+def build_tps_template():
+    """Build a blank TPS upload template. Column names match exactly what
+    the admin upload code reads, so the file can be re-uploaded as is."""
+    emp_cols = [
+        "emp_id", "emp_name", "region", "sales_force_category",
+        "contact_number", "email", "field_operations_manager",
+        "reporting_manager", "regional_manager",
+    ]
+    counter_cols = ["partner_name", "gst_number", "city", "state", "emp_id"]
+
+    # One sample row each so users see the expected format (delete before upload)
+    emp_df = pd.DataFrame([{
+        "emp_id": "E1001",
+        "emp_name": "Rahul Sharma",
+        "region": "North",
+        "sales_force_category": "FOS",
+        "contact_number": "9876543210",
+        "email": "rahul.sharma@example.com",
+        "field_operations_manager": "Amit Verma",
+        "reporting_manager": "Suresh Gupta",
+        "regional_manager": "Neha Singh",
+    }], columns=emp_cols)
+
+    counter_df = pd.DataFrame([{
+        "partner_name": "Sample Car Counter",
+        "gst_number": "27AAFCA1234G2Z0",
+        "city": "Jaipur",
+        "state": "Rajasthan",
+        "emp_id": "E1001",
+    }], columns=counter_cols)
+
+    instructions_df = pd.DataFrame({
+        "Instructions": [
+            "1. Fill the 'Employees' sheet: one row per employee. emp_id and emp_name are mandatory.",
+            "2. Fill the 'Counters' sheet: one row per counter. partner_name, gst_number and emp_id are mandatory.",
+            "3. emp_id in 'Counters' must match an emp_id in 'Employees'.",
+            "4. GST must be 15 characters, e.g. 27AAFCA1234G2Z0. Invalid GST rows are skipped.",
+            "5. Do NOT rename or reorder column headers.",
+            "6. Delete the sample rows before uploading.",
+            "7. Upload this file in Admin Dashboard > Upload TPS Excel File and pick the matching sheets.",
+        ]
+    })
+
+    return to_excel_bytes_formatted({
+        "Instructions": instructions_df,
+        "Employees": emp_df,
+        "Counters": counter_df,
+    })
 
 
 # ---------------------------------------------------------------
@@ -323,13 +358,11 @@ def login():
 
         if st.button("Login as Employee", key="emp_login_btn", use_container_width=True):
             try:
-                # First, check if credentials exist in employee_users table
                 auth_result = supabase.table("employee_users").select("emp_id").eq("emp_id", emp_id).eq("emp_password", emp_password).execute()
 
                 if auth_result.data and len(auth_result.data) > 0:
-                    # Credentials are correct, now get employee details
                     emp_result = supabase.table("employees").select("emp_name").eq("emp_id", emp_id).execute()
-                    
+
                     if emp_result.data and len(emp_result.data) > 0:
                         st.session_state.logged_in = True
                         st.session_state.user_type = 'employee'
@@ -403,7 +436,7 @@ def employee_dashboard():
 
         emp_data = emp_result.data[0]
 
-        # ---- Profile card (mirrors the master fields in the Excel sheet) ----
+        # ---- Profile card ----
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Employee ID", emp_data.get("emp_id", "-"))
@@ -424,7 +457,7 @@ def employee_dashboard():
 
         st.divider()
 
-        # ---- All counters/partners assigned to this employee, Excel-style ----
+        # ---- Counters assigned to this employee ----
         st.subheader("📋 My CAR Counters")
         partners_data = fetch_all_rows("partners", eq_filters={"emp_id": st.session_state.user_id})
 
@@ -444,12 +477,11 @@ def employee_dashboard():
             with search_col:
                 search = st.text_input("🔎 Search my counters (name, GST, city, state)", key="my_counter_search")
             with dl_col:
-                st.write("")  # Spacing for alignment
-            
-            # Download options
+                st.write("")
+
             st.write("**Download Options:**")
             dl_col1, dl_col2 = st.columns(2)
-            
+
             profile_df = pd.DataFrame([{
                 "Employee ID": emp_data.get("emp_id"),
                 "Name": emp_data.get("emp_name"),
@@ -461,10 +493,9 @@ def employee_dashboard():
                 "Reporting Manager": emp_data.get("reporting_manager"),
                 "Regional Manager": emp_data.get("regional_manager"),
             }])
-            
+
             counters_display_df = full_partner_df[display_cols].rename(columns=rename)
-            
-            # Excel Download (Formatted)
+
             with dl_col1:
                 excel_bytes_formatted = to_excel_bytes_formatted({
                     "My Profile": profile_df,
@@ -477,8 +508,7 @@ def employee_dashboard():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
-            
-            # CSV Download (Counters only)
+
             with dl_col2:
                 csv_data = counters_display_df.to_csv(index=False).encode('utf-8')
                 st.download_button(
@@ -505,9 +535,9 @@ def employee_dashboard():
 
         # ---- Request new partner/counter ----
         st.subheader("➕ Request New Counter/Partner")
-        
+
         st.info("📋 **GST Format:** 15 alphanumeric characters (e.g., 27AAFCA1234G2Z0)")
-        
+
         with st.form("new_partner_request"):
             col1, col2 = st.columns(2)
 
@@ -520,15 +550,11 @@ def employee_dashboard():
                 new_state = st.text_input("State")
                 reason = st.text_area("Reason for New Counter", height=80)
 
-            # Validate GST format before submission
-            gst_valid = True
-            if new_gst:
-                gst_valid, gst_message = validate_gst_format(new_gst)
-                if not gst_valid:
-                    st.error(gst_message)
+            submitted_new = st.form_submit_button("Submit Request", use_container_width=True)
 
-            if st.form_submit_button("Submit Request", use_container_width=True):
+            if submitted_new:
                 if new_partner_name and new_gst and reason:
+                    gst_valid, gst_message = validate_gst_format(new_gst)
                     if gst_valid:
                         try:
                             request_data = {
@@ -543,7 +569,7 @@ def employee_dashboard():
                                 'status': 'Pending'
                             }
                             supabase.table("partner_requests").insert(request_data).execute()
-                            
+
                             # ── 🔔 WhatsApp Notify TL ──
                             tl_info = get_tl_for_employee(st.session_state.user_id)
                             if tl_info and tl_info.get("whatsapp_number"):
@@ -559,14 +585,13 @@ def employee_dashboard():
                                     f"🔗 Please review in the TL Dashboard."
                                 )
                                 send_whatsapp_notification(tl_info["whatsapp_number"], msg)
-                            # ───────────────────────────
-                            
+
                             st.success("✅ Request submitted successfully! Waiting for TL approval.")
                             get_all_partners_df.clear()
                         except Exception as e:
                             st.error(f"Error submitting request: {str(e)}")
                     else:
-                        st.error("❌ Please enter a valid GST number before submitting.")
+                        st.error(gst_message)
                 else:
                     st.error("Please fill all required fields (name, GST, reason)")
 
@@ -587,21 +612,20 @@ def employee_dashboard():
 
         # ---- Request Counter Removal ----
         st.subheader("🗑️ Request Counter Removal")
-        
+
         if partners_data:
             with st.form("remove_counter_request"):
                 col1, col2 = st.columns(2)
-                
+
                 with col1:
-                    # Select counter to remove
-                    counter_options = {f"{p['partner_name']} ({p['gst_number']})": p['partner_id'] 
-                                      for p in partners_data}
+                    counter_options = {f"{p['partner_name']} ({p['gst_number']})": p['partner_id']
+                                       for p in partners_data}
                     selected_counter = st.selectbox(
                         "Select Counter to Remove",
                         options=list(counter_options.keys()),
                         key="remove_counter_select"
                     )
-                
+
                 with col2:
                     removal_reason = st.text_area(
                         "Reason for Removal",
@@ -609,14 +633,13 @@ def employee_dashboard():
                         height=100,
                         key="removal_reason"
                     )
-                
+
                 if st.form_submit_button("Submit Removal Request", use_container_width=True, type="secondary"):
                     if selected_counter and removal_reason:
                         try:
                             selected_partner_id = counter_options[selected_counter]
-                            # Find partner details
                             selected_partner = next(p for p in partners_data if p['partner_id'] == selected_partner_id)
-                            
+
                             removal_request_data = {
                                 'emp_id': st.session_state.user_id,
                                 'emp_name': emp_data['emp_name'],
@@ -628,7 +651,7 @@ def employee_dashboard():
                                 'status': 'Pending'
                             }
                             supabase.table("counter_removal_requests").insert(removal_request_data).execute()
-                            
+
                             # ── 🔔 WhatsApp Notify TL ──
                             tl_info = get_tl_for_employee(st.session_state.user_id)
                             if tl_info and tl_info.get("whatsapp_number"):
@@ -643,8 +666,7 @@ def employee_dashboard():
                                     f"🔗 Please review in the TL Dashboard."
                                 )
                                 send_whatsapp_notification(tl_info["whatsapp_number"], msg)
-                            # ───────────────────────────
-                            
+
                             st.success("✅ Removal request submitted! Waiting for TL approval.")
                             get_all_partners_df.clear()
                         except Exception as e:
@@ -679,33 +701,24 @@ def tl_dashboard():
     st.title(f"👨‍💼 TL Dashboard - {st.session_state.user_name}")
 
     try:
-        # Get TL's region from tl_users table (tolerant of region/Region casing)
         tl_region = get_tl_region(st.session_state.user_id)
-        
-        # Show region info
+
         if tl_region:
             st.success(f"🔍 Region: **{tl_region}** - Viewing employees and requests from this region only")
         else:
             st.warning("⚠️ TL region not assigned. Contact admin to set your region. Showing all regions until then.")
 
-        # Build the set of employee IDs in this TL's region once, up front.
-        # Every tab below filters against this set instead of hitting the
-        # database per-row (which was slow and is what caused the earlier
-        # N+1 query pattern).
         emp_df_all = get_all_employees_df()
         if tl_region and not emp_df_all.empty and "region" in emp_df_all.columns:
             region_emp_ids = set(emp_df_all[emp_df_all["region"] == tl_region]["emp_id"])
         else:
-            # No region assigned to this TL yet, or no employees have a
-            # region set - fall back to showing everything so the TL
-            # dashboard isn't empty/broken while region setup is in progress.
             region_emp_ids = set(emp_df_all["emp_id"]) if not emp_df_all.empty else set()
 
         st.divider()
-        
+
         tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
             "📥 Pending New Counter Requests", "✅ Approved Requests", "❌ Rejected Requests",
-            "👥 All Employees", "🏬 All Counters (Excel view)", 
+            "👥 All Employees", "🏬 All Counters (Excel view)",
             "🗑️ Pending Removal Requests", "✅ Approved Removals"
         ])
 
@@ -853,8 +866,8 @@ def tl_dashboard():
                     filtered = filtered[mask]
 
                 display_cols = ["emp_id", "emp_name", "region", "sales_force_category", "contact_number",
-                                 "email", "field_operations_manager", "reporting_manager", "regional_manager",
-                                 "counter_count"]
+                                "email", "field_operations_manager", "reporting_manager", "regional_manager",
+                                "counter_count"]
                 display_cols = [c for c in display_cols if c in filtered.columns]
                 rename = {
                     "emp_id": "Employee ID", "emp_name": "Name", "region": "Region",
@@ -877,8 +890,8 @@ def tl_dashboard():
                 st.info("No counters found.")
             else:
                 merge_cols = [c for c in ["emp_id", "region", "sales_force_category", "emp_name",
-                                           "contact_number", "email", "field_operations_manager",
-                                           "reporting_manager", "regional_manager"] if c in emp_df.columns]
+                                          "contact_number", "email", "field_operations_manager",
+                                          "reporting_manager", "regional_manager"] if c in emp_df.columns]
                 merged = partners_df.merge(emp_df[merge_cols], on="emp_id", how="left")
 
                 fcol1, fcol2, fcol3, fcol4 = st.columns(4)
@@ -950,7 +963,6 @@ def tl_dashboard():
                         with col2:
                             if st.button("✅ Approve & Remove", key=f"approve_removal_{req['partner_id']}"):
                                 try:
-                                    # Update removal request status
                                     supabase.table("counter_removal_requests").update({
                                         'status': 'Approved',
                                         'tl_comments': tl_comment,
@@ -958,7 +970,6 @@ def tl_dashboard():
                                         'reviewed_date': datetime.now().isoformat()
                                     }).eq("partner_id", req['partner_id']).eq("status", "Pending").execute()
 
-                                    # Delete the counter from partners table
                                     supabase.table("partners").delete().eq("partner_id", req['partner_id']).execute()
 
                                     st.success("✅ Counter removed successfully!")
@@ -1032,7 +1043,7 @@ def admin_dashboard():
 
         # ---- Upload TPS Excel File ----
         st.subheader("📤 Upload TPS Excel File")
-        
+
         with st.expander("ℹ️ Upload Instructions", expanded=False):
             st.info("""
             **Excel File Requirements:**
@@ -1040,48 +1051,58 @@ def admin_dashboard():
             - Expected columns for employees: emp_id, emp_name, region, sales_force_category, contact_number, email, field_operations_manager, reporting_manager, regional_manager
             - Expected columns for counters: partner_name, gst_number, city, state, emp_id (to link to employee)
             - GST numbers must be in valid format (15 alphanumeric characters, e.g., 27AAFCA1234G2Z0)
+            - Tip: download the template below, fill it in, and upload it here
             """)
-        
+
+        # ---- Template download ----
+        st.download_button(
+            "📥 Download Upload Template",
+            data=build_tps_template(),
+            file_name="TPS_Upload_Template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_tps_template",
+        )
+
         uploaded_file = st.file_uploader("Choose TPS Excel file", type=["xlsx", "xls"], key="tps_upload")
-        
+
         if uploaded_file:
             try:
-                # Read Excel file
                 xls = pd.ExcelFile(uploaded_file)
                 sheet_names = xls.sheet_names
-                
+
                 st.info(f"📋 Found sheets: {', '.join(sheet_names)}")
-                
-                # Let admin select which sheets contain employees and counters
+
+                # Default to the template's sheet names when present
+                emp_default = sheet_names.index("Employees") if "Employees" in sheet_names else 0
+                counter_default = sheet_names.index("Counters") if "Counters" in sheet_names else 0
+
                 col1, col2 = st.columns(2)
                 with col1:
-                    emp_sheet = st.selectbox("Sheet with Employee Data", sheet_names, key="emp_sheet_select")
+                    emp_sheet = st.selectbox("Sheet with Employee Data", sheet_names, index=emp_default, key="emp_sheet_select")
                 with col2:
-                    counter_sheet = st.selectbox("Sheet with Counter Data", sheet_names, key="counter_sheet_select")
-                
+                    counter_sheet = st.selectbox("Sheet with Counter Data", sheet_names, index=counter_default, key="counter_sheet_select")
+
                 if st.button("Preview Data", key="preview_upload_btn"):
                     emp_df_upload = pd.read_excel(uploaded_file, sheet_name=emp_sheet)
                     counter_df_upload = pd.read_excel(uploaded_file, sheet_name=counter_sheet)
-                    
+
                     st.subheader("👥 Employee Preview")
                     st.dataframe(emp_df_upload.head(), use_container_width=True)
-                    
+
                     st.subheader("🏬 Counter Preview")
                     st.dataframe(counter_df_upload.head(), use_container_width=True)
-                
+
                 if st.button("⬆️ Upload & Import Data", key="upload_tps_btn", type="primary"):
-                    emp_df_upload = pd.read_excel(uploaded_file, sheet_name=emp_sheet)
-                    counter_df_upload = pd.read_excel(uploaded_file, sheet_name=counter_sheet)
-                    
-                    # Progress tracking
+                    emp_df_upload = pd.read_excel(uploaded_file, sheet_name=emp_sheet, dtype=str)
+                    counter_df_upload = pd.read_excel(uploaded_file, sheet_name=counter_sheet, dtype=str)
+
                     progress_bar = st.progress(0)
                     status_placeholder = st.empty()
-                    
+
                     try:
-                        # Clean column names (remove whitespace)
                         emp_df_upload.columns = emp_df_upload.columns.str.strip()
                         counter_df_upload.columns = counter_df_upload.columns.str.strip()
-                        
+
                         # Upload employees
                         emp_count = 0
                         for idx, row in emp_df_upload.iterrows():
@@ -1096,40 +1117,40 @@ def admin_dashboard():
                                 "reporting_manager": str(row.get("reporting_manager", "")) if pd.notna(row.get("reporting_manager")) else None,
                                 "regional_manager": str(row.get("regional_manager", "")) if pd.notna(row.get("regional_manager")) else None,
                             }
-                            
-                            # Skip if emp_id is empty
-                            if emp_data["emp_id"]:
+
+                            if emp_data["emp_id"] and emp_data["emp_id"].lower() != "nan":
                                 try:
                                     supabase.table("employees").insert(emp_data).execute()
                                     emp_count += 1
-                                except Exception as e:
+                                except Exception:
                                     # Employee might already exist, try update
                                     try:
                                         supabase.table("employees").update(emp_data).eq("emp_id", emp_data["emp_id"]).execute()
                                         emp_count += 1
-                                    except:
+                                    except Exception:
                                         pass
-                        
+
                         progress_bar.progress(50)
                         status_placeholder.info(f"✅ Imported {emp_count} employees")
-                        
+
                         # Upload counters
                         counter_count = 0
                         invalid_gst_count = 0
-                        
+                        run_stamp = datetime.now().strftime('%Y%m%d%H%M%S')
+
                         for idx, row in counter_df_upload.iterrows():
-                            gst = str(row.get("gst_number", "")).strip().upper()
-                            
-                            # Validate GST
+                            raw_gst = row.get("gst_number", "")
+                            gst = "" if pd.isna(raw_gst) else str(raw_gst).strip().upper()
+
                             gst_valid, _ = validate_gst_format(gst)
-                            
+
                             if not gst_valid:
                                 invalid_gst_count += 1
                                 st.warning(f"Row {idx+2}: Invalid GST format '{gst}' - Skipping this counter")
                                 continue
-                            
+
                             counter_data = {
-                                "partner_id": f"P{datetime.now().strftime('%Y%m%d%H%M%S')}{idx}",
+                                "partner_id": f"P{run_stamp}{idx}",
                                 "partner_name": str(row.get("partner_name", "")).strip(),
                                 "gst_number": gst,
                                 "city": str(row.get("city", "")) if pd.notna(row.get("city")) else None,
@@ -1138,45 +1159,42 @@ def admin_dashboard():
                                 "status": "Active",
                                 "created_date": datetime.now().isoformat()
                             }
-                            
+
                             if counter_data["partner_name"] and counter_data["emp_id"]:
                                 try:
                                     supabase.table("partners").insert(counter_data).execute()
                                     counter_count += 1
                                 except Exception as e:
                                     st.warning(f"Row {idx+2}: Could not insert counter - {str(e)}")
-                        
+
                         progress_bar.progress(100)
-                        
+
                         st.success(f"""
                         ✅ **Upload Complete!**
                         - Employees imported: {emp_count}
                         - Counters imported: {counter_count}
                         - Invalid GST numbers skipped: {invalid_gst_count}
                         """)
-                        
-                        # Clear cache
+
                         get_all_employees_df.clear()
                         get_all_partners_df.clear()
-                        
-                        # Rerun after a delay
-                        import time
+
                         time.sleep(2)
                         st.rerun()
-                        
+
                     except Exception as e:
                         st.error(f"❌ Error during upload: {str(e)}")
-                        
+
             except Exception as e:
                 st.error(f"❌ Error reading file: {str(e)}")
 
         st.divider()
 
-        # ---- Compute the Excel-style merged counters view (used below) ----
+        # ---- Excel-style merged counters view ----
         if not partners_df.empty:
             merge_cols = [c for c in ["emp_id", "region", "sales_force_category", "emp_name",
-                                       "contact_number", "email", "field_operations_manager",
-                                       "reporting_manager", "regional_manager"] if c in emp_df.columns]
+                                      "contact_number", "email", "field_operations_manager",
+                                      "reporting_manager", "regional_manager"] if c in emp_df.columns]
             merged = partners_df.merge(emp_df[merge_cols], on="emp_id", how="left")
             counters_export = format_display(merged)
         else:
@@ -1319,6 +1337,7 @@ def main():
             tl_dashboard()
         elif st.session_state.user_type == 'admin':
             admin_dashboard()
+
 
 if __name__ == "__main__":
     main()
